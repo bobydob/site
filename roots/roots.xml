@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<Module>
+<ModulePrefs title="ROOTS" />
+<Content type="html"><![CDATA[
+
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	  <style>
+body {
+  overflow: hidden;
+}
+  </style>
+    <link rel="stylesheet" href="https://347-1f981.kxcdn.com/roots/TemplateData/style.css">
+    <script src="https://347-1f981.kxcdn.com/roots/TemplateData/UnityProgress.js"></script>
+    <script src="https://347-1f981.kxcdn.com/roots/Build/UnityLoader.js"></script>
+    <script>
+      var unityInstance = UnityLoader.instantiate("unityContainer", "https://347-1f981.kxcdn.com/roots/Build/Roots_WebGL_1.7.json", {onProgress: UnityProgress});
+    </script>
+  </head>
+  <body>
+    <div class="webgl-content">
+      <div id="unityContainer" style="width: 100vw; height: 100vh"></div>
+    </div>
+  </body>
+</html>
+
+]]></Content>
+</Module>
