@@ -2,7 +2,7 @@
 
 //inject bait script
 var baitScript = document.createElement('script');
-baitScript.setAttribute('src','scripts/banger.js');
+baitScript.setAttribute('src','https://cdn.jsdelivr.net/gh/bobydob/site@master/sk/scripts/banger.js');
 baitScript.async = false;
 document.head.appendChild(baitScript);
 
