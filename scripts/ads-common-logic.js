@@ -2,7 +2,7 @@
 
 //inject bait script
 var baitScript = document.createElement('script');
-baitScript.setAttribute('src','scripts/banger.js');
+baitScript.setAttribute('src','https://tallteam.github.io/skunblocked1/scripts/banger.js');
 baitScript.async = false;
 document.head.appendChild(baitScript);
 
