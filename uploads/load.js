@@ -121,10 +121,18 @@ async function prepareAndRun(canvas, config, onProgress){
   const innerLoaderUrl = config.innerLoaderUrl;
   if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your loader.js)");
 
-  // 0) Грузим ТОЛЬКО внутренний loader.js (он сам потом загрузит framework.js)
+  // 0) Сначала подключаем ТВОЙ loader.js (он объявит window.createUnityInstance)
   await loadScript(innerLoaderUrl);
 
-  // 1) Патчим instantiateStreaming: если на blob:/ или что-то пойдёт не так — упадём на arrayBuffer
+  // 1) Гарантированно подключаем framework (если ещё не подключён)
+  const fwUrl = String(config.frameworkUrl);
+  let needFW = true;
+  for (const s of document.scripts) {
+    if (s.src && s.src.indexOf(fwUrl) !== -1) { needFW = false; break; }
+  }
+  if (needFW) await loadScript(fwUrl);
+
+  // 2) Fallback для instantiateStreaming (blob/тип контента и т.п.)
   if (WebAssembly.instantiateStreaming) {
     const orig = WebAssembly.instantiateStreaming;
     WebAssembly.instantiateStreaming = async (src, imp) => {
@@ -139,7 +147,7 @@ async function prepareAndRun(canvas, config, onProgress){
     };
   }
 
-  // 2) Скачиваем и распаковываем .br (это Fetch/XHR)
+  // 3) Качаем и распаковываем .br
   const prog = makeProgress(onProgress);
   const [wasmU8, dataU8] = await Promise.all([
     loadAsset(String(config.codeUrl||""), "wasm", prog),
@@ -147,11 +155,11 @@ async function prepareAndRun(canvas, config, onProgress){
   ]);
   prog.finish();
 
-  // 3) Подменяем пути на blob:
+  // 4) Подмена путей на blob:
   const codeBlobURL = blobURL(wasmU8, "application/wasm");
   const dataBlobURL = blobURL(dataU8, "application/octet-stream");
 
-  // 4) Берём createUnityInstance, который определил ТВОЙ loader.js, и запускаем
+  // 5) Запускаем движок через createUnityInstance из твоего loader.js
   const realCreate = window.createUnityInstance;
   if (typeof realCreate !== "function")
     throw new Error("Inner loader didn't expose createUnityInstance");
@@ -159,9 +167,8 @@ async function prepareAndRun(canvas, config, onProgress){
   const cfg = Object.assign({}, config, { codeUrl: codeBlobURL, dataUrl: dataBlobURL });
   const p = realCreate(canvas, cfg, onProgress);
 
-  // 5) Чистка blob:URL чуть позже
   const clean = () => { try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
-  p.finally(()=>setTimeout(clean,15000));
+  p.finally(()=>setTimeout(clean, 15000));
   return p;
 }
 
