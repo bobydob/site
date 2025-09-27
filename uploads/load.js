@@ -116,43 +116,38 @@
     });
   }
 
-  async function prepareAndRun(canvas, config, onProgress){
-    if (!config || !config.frameworkUrl) throw new Error("config.frameworkUrl is required");
-    const innerLoaderUrl = config.innerLoaderUrl;
-    if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your trimmed loader.js)");
+async function prepareAndRun(canvas, config, onProgress){
+  if (!config || !config.frameworkUrl) throw new Error("config.frameworkUrl is required");
+  const innerLoaderUrl = config.innerLoaderUrl;
+  if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your trimmed loader.js)");
 
-    const prog = makeProgress(onProgress);
+  // 0) Сначала грузим framework и внутренний лоадер (видно в Network как Script/JS)
+  await loadScript(config.frameworkUrl);
+  await loadScript(innerLoaderUrl);
 
-    // 1) Скачиваем + распаковываем .br
-    const [wasmU8, dataU8] = await Promise.all([
-      loadAsset(String(config.codeUrl||""), "wasm", prog),
-      loadAsset(String(config.dataUrl||""), "data", prog),
-    ]);
-    prog.finish();
+  // 1) Скачиваем и распаковываем .br (это уже Fetch/XHR)
+  const prog = makeProgress(onProgress);
+  const [wasmU8, dataU8] = await Promise.all([
+    loadAsset(String(config.codeUrl||""), "wasm", prog),
+    loadAsset(String(config.dataUrl||""), "data", prog),
+  ]);
+  prog.finish();
 
-    // 2) Подменяем пути на blob:
-    const codeBlobURL = blobURL(wasmU8, "application/wasm");
-    const dataBlobURL = blobURL(dataU8, "application/octet-stream");
+  // 2) Подменяем пути на blob:
+  const codeBlobURL = blobURL(wasmU8, "application/wasm");
+  const dataBlobURL = blobURL(dataU8, "application/octet-stream");
 
-    // 3) Грузим framework.js + твой внутренний лоадер
-    await loadScript(config.frameworkUrl);
-    await loadScript(innerLoaderUrl);
+  // 3) Берём createUnityInstance из внутреннего лоадера и запускаем
+  const realCreate = window.createUnityInstance;
+  if (typeof realCreate !== "function") throw new Error("Inner loader did not expose createUnityInstance");
+  const cfg = Object.assign({}, config, { codeUrl: codeBlobURL, dataUrl: dataBlobURL });
+  const p = realCreate(canvas, cfg, onProgress);
 
-    // 4) Берём реальный createUnityInstance из внутреннего лоадера
-    const realCreate = window.createUnityInstance;
-    if (realCreate === outerCreateUnityInstance || typeof realCreate !== "function") {
-      throw new Error("Inner loader did not expose a valid createUnityInstance");
-    }
-
-    // 5) Запускаем с подменёнными путями
-    const cfg = Object.assign({}, config, { codeUrl: codeBlobURL, dataUrl: dataBlobURL });
-    const p = realCreate(canvas, cfg, onProgress);
-
-    // 6) Чистим blob:URL позже
-    const clean = () => { try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
-    p.then(()=>setTimeout(clean,15000)).catch(()=>setTimeout(clean,15000));
-    return p;
-  }
+  // 4) Чистка blob:URL позже
+  const clean = () => { try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
+  p.then(()=>setTimeout(clean,15000)).catch(()=>setTimeout(clean,15000));
+  return p;
+}
 
   // ╭─────────────────────────────────────────────────────────────╮
   // │ 6) Экспортируем drop-in createUnityInstance                 │
