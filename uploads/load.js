@@ -121,10 +121,10 @@ async function prepareAndRun(canvas, config, onProgress){
   const innerLoaderUrl = config.innerLoaderUrl;
   if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your loader.js)");
 
-  // 0) Сначала подключаем ТВОЙ loader.js (он объявит window.createUnityInstance)
+  // 0) Сначала — внутренний loader.js (он объявит createUnityInstance)
   await loadScript(innerLoaderUrl);
 
-  // 1) Гарантированно подключаем framework (если ещё не подключён)
+  // 1) Framework — если ещё не подключён
   const fwUrl = String(config.frameworkUrl);
   let needFW = true;
   for (const s of document.scripts) {
@@ -132,7 +132,7 @@ async function prepareAndRun(canvas, config, onProgress){
   }
   if (needFW) await loadScript(fwUrl);
 
-  // 2) Fallback для instantiateStreaming (blob/тип контента и т.п.)
+  // 2) Безопасный fallback для instantiateStreaming (blob/миме/кэш)
   if (WebAssembly.instantiateStreaming) {
     const orig = WebAssembly.instantiateStreaming;
     WebAssembly.instantiateStreaming = async (src, imp) => {
@@ -147,7 +147,7 @@ async function prepareAndRun(canvas, config, onProgress){
     };
   }
 
-  // 3) Качаем и распаковываем .br
+  // 3) Скачиваем и распаковываем .br
   const prog = makeProgress(onProgress);
   const [wasmU8, dataU8] = await Promise.all([
     loadAsset(String(config.codeUrl||""), "wasm", prog),
@@ -155,18 +155,39 @@ async function prepareAndRun(canvas, config, onProgress){
   ]);
   prog.finish();
 
-  // 4) Подмена путей на blob:
+  // 4) Подменяем пути на blob:
   const codeBlobURL = blobURL(wasmU8, "application/wasm");
   const dataBlobURL = blobURL(dataU8, "application/octet-stream");
 
-  // 5) Запускаем движок через createUnityInstance из твоего loader.js
+  // 5) Страховка от «залипаний»: включаем явный вывод ошибок Emscripten
   const realCreate = window.createUnityInstance;
   if (typeof realCreate !== "function")
     throw new Error("Inner loader didn't expose createUnityInstance");
 
-  const cfg = Object.assign({}, config, { codeUrl: codeBlobURL, dataUrl: dataBlobURL });
+  // Сбрасываем возможный старый Module
+  try { if (window.Module) delete window.Module; } catch {}
+
+  const cfg = Object.assign({}, config, {
+    codeUrl: codeBlobURL,
+    dataUrl: dataBlobURL,
+
+    // вытащить скрытые ошибки
+    print:    (t)=>{ try{console.log(t);}catch{} },
+    printErr: (t)=>{ try{console.error(t);}catch{} },
+    onAbort:  (r)=>{ try{console.error("Unity abort:", r);}catch{} },
+
+    // иногда нужен, если у тебя есть StreamingAssets
+    streamingAssetsUrl: config.streamingAssetsUrl || "StreamingAssets",
+  });
+
+  // 6) Запуск
   const p = realCreate(canvas, cfg, onProgress);
 
+  // логируем исход, если он есть
+  p.then(()=>console.log("[loader] started"))
+   .catch(e=>console.error("[loader] start error:", e));
+
+  // 7) Чистка blob позже
   const clean = () => { try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
   p.finally(()=>setTimeout(clean, 15000));
   return p;
