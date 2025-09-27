@@ -119,33 +119,56 @@
 async function prepareAndRun(canvas, config, onProgress){
   if (!config || !config.frameworkUrl) throw new Error("config.frameworkUrl is required");
   const innerLoaderUrl = config.innerLoaderUrl;
-  if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your trimmed loader.js)");
+  if (!innerLoaderUrl) throw new Error("config.innerLoaderUrl is required (path to your loader.js)");
 
-  // 0) Сначала грузим framework и внутренний лоадер (видно в Network как Script/JS)
+  console.log("[loader] framework:", config.frameworkUrl);
   await loadScript(config.frameworkUrl);
-  await loadScript(innerLoaderUrl);
+  console.log("[loader] framework loaded");
 
-  // 1) Скачиваем и распаковываем .br (это уже Fetch/XHR)
+  console.log("[loader] inner loader:", innerLoaderUrl);
+  await loadScript(innerLoaderUrl);
+  console.log("[loader] inner loader loaded");
+
+  // Fallback для instantiateStreaming (бывает «тихо ломается» на blob/нестандартных типах)
+  if (WebAssembly.instantiateStreaming) {
+    const orig = WebAssembly.instantiateStreaming;
+    WebAssembly.instantiateStreaming = async (src, imp) => {
+      try {
+        const resp = await (src instanceof Promise ? src : Promise.resolve(src));
+        try { return await orig(Promise.resolve(resp), imp); }
+        catch { const buf = await resp.arrayBuffer(); return WebAssembly.instantiate(buf, imp); }
+      } catch {
+        const r = await fetch(src); const b = await r.arrayBuffer();
+        return WebAssembly.instantiate(b, imp);
+      }
+    };
+  }
+
+  // Скачиваем и распаковываем .br
   const prog = makeProgress(onProgress);
+  console.log("[loader] fetching & decoding .br …");
   const [wasmU8, dataU8] = await Promise.all([
     loadAsset(String(config.codeUrl||""), "wasm", prog),
     loadAsset(String(config.dataUrl||""), "data", prog),
   ]);
   prog.finish();
+  console.log("[loader] decode done:", { wasm: wasmU8.length, data: dataU8.length });
 
-  // 2) Подменяем пути на blob:
   const codeBlobURL = blobURL(wasmU8, "application/wasm");
   const dataBlobURL = blobURL(dataU8, "application/octet-stream");
 
-  // 3) Берём createUnityInstance из внутреннего лоадера и запускаем
   const realCreate = window.createUnityInstance;
-  if (typeof realCreate !== "function") throw new Error("Inner loader did not expose createUnityInstance");
+  if (typeof realCreate !== "function") throw new Error("Inner loader didn't expose createUnityInstance");
+
   const cfg = Object.assign({}, config, { codeUrl: codeBlobURL, dataUrl: dataBlobURL });
+  console.log("[loader] calling createUnityInstance…");
   const p = realCreate(canvas, cfg, onProgress);
 
-  // 4) Чистка blob:URL позже
-  const clean = () => { try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
-  p.then(()=>setTimeout(clean,15000)).catch(()=>setTimeout(clean,15000));
+  p.then(()=>console.log("[loader] createUnityInstance resolved (game started)"))
+   .catch(e=>console.error("[loader] createUnityInstance rejected:", e));
+
+  const clean=()=>{ try{URL.revokeObjectURL(codeBlobURL);}catch{} try{URL.revokeObjectURL(dataBlobURL);}catch{} };
+  p.finally(()=>setTimeout(clean,15000));
   return p;
 }
 
