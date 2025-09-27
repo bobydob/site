@@ -1,3 +1,4 @@
+console.log("[br-loader] file loaded");
 // custom-loader.br.js — ЛОАДЕР с распаковкой Brotli, без шима и без внешних ссылок
 (() => {
   // ╭─────────────────────────────────────────────────────────────╮
@@ -200,8 +201,7 @@ async function prepareAndRun(canvas, config, onProgress){
     return prepareAndRun(canvas, config, onProgress);
   }
 
-Object.defineProperty(window, "startUnityBr", {
-  configurable: true, enumerable: true, writable: true, value: outerCreateUnityInstance
-});
+window.startUnityBr = outerCreateUnityInstance;
+console.log("[br-loader] startUnityBr exported:", typeof window.startUnityBr);
 })();
 
