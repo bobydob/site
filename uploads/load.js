@@ -179,8 +179,8 @@ async function prepareAndRun(canvas, config, onProgress){
     return prepareAndRun(canvas, config, onProgress);
   }
 
-  Object.defineProperty(window, "createUnityInstance", {
-    configurable:true, enumerable:true, writable:true, value: outerCreateUnityInstance
-  });
+Object.defineProperty(window, "startUnityBr", {
+  configurable: true, enumerable: true, writable: true, value: outerCreateUnityInstance
+});
 })();
 
