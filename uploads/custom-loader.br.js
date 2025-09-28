@@ -1,226 +1,170 @@
-/* custom-loader.br.js
- * Unity WebGL BR Loader (outer loader, no global fetch hook)
- * - Downloads .wasm.br & .data.br
- * - Decompresses (Brotli) in JS
- * - Rewrites to blob: URLs with proper MIME
- * - Calls inner loader's createUnityInstance
+/* custom-loader.br.js — outer loader with fallback
+ * - Path A: DecompressionStream('br') → blob: → inner loader (loader.js)
+ * - Path B: NO 'br' support → gracefully fall back to your 2loader.js
  */
 (() => {
   const TAG = "[br-loader]";
   console.log(`${TAG} file loaded`);
 
-  // ---------------- small utils ----------------
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const clamp01 = (v) => Math.max(0, Math.min(1, v ?? 0));
+  const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+  const hasDS = typeof DecompressionStream === "function";
 
-  const once = (fn) => {
-    let done = false, p;
-    return (...args) => done ? p : (done = true, p = fn(...args));
-  };
-
-  function loadScript(url) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = url;
-      s.async = false; // preserve order
-      s.onload = resolve;
-      s.onerror = () => reject(new Error(`${TAG} failed to load script: ${url}`));
+  function loadScript(url){
+    return new Promise((resolve,reject)=>{
+      const s=document.createElement("script");
+      s.src=url; s.async=false;
+      s.onload=resolve;
+      s.onerror=()=>reject(new Error(`${TAG} failed to load script: ${url}`));
       document.head.appendChild(s);
     });
   }
 
-  const loadInnerLoaderOnce = once(async (url) => {
+  const once = (fn)=>{ let p,done=false; return (...a)=>done?p:(done=true,p=fn(...a)); };
+  const loadInnerOnce = once(async (url)=>{
     console.log(`${TAG} loading inner loader: ${url}`);
     await loadScript(url);
-    if (typeof window.createUnityInstance !== "function") {
+    if (typeof window.createUnityInstance!=="function"){
       throw new Error(`${TAG} inner loader did not expose createUnityInstance`);
     }
     console.log(`${TAG} inner loader ready`);
   });
 
-  // Patch instantiateStreaming to be robust (blob: is fine, but keep fallback)
-  (function patchInstantiateStreaming() {
+  (function patchInstantiateStreaming(){
     const orig = WebAssembly.instantiateStreaming;
-    if (!orig) {
-      WebAssembly.instantiateStreaming = async (respPromise, importObject) => {
-        const resp = await respPromise;
-        const buf = await resp.arrayBuffer();
-        return WebAssembly.instantiate(buf, importObject);
+    if (!orig){
+      WebAssembly.instantiateStreaming = async (respPromise, imports)=>{
+        const resp = await respPromise; const buf = await resp.arrayBuffer();
+        return WebAssembly.instantiate(buf, imports);
       };
-      console.log(`${TAG} patched instantiateStreaming (polyfill)`);
-      return;
+      console.log(`${TAG} patched instantiateStreaming (polyfill)`); return;
     }
-    WebAssembly.instantiateStreaming = async (respPromise, importObject) => {
-      try { return await orig(respPromise, importObject); }
-      catch (e) {
-        console.warn(`${TAG} instantiateStreaming failed, falling back`, e);
-        const resp = await respPromise;
-        const buf = await resp.arrayBuffer();
-        return WebAssembly.instantiate(buf, importObject);
+    WebAssembly.instantiateStreaming = async (respPromise, imports)=>{
+      try{ return await orig(respPromise, imports); }
+      catch(e){ console.warn(`${TAG} instantiateStreaming failed, falling back`, e);
+        const resp = await respPromise; const buf = await resp.arrayBuffer();
+        return WebAssembly.instantiate(buf, imports);
       }
     };
     console.log(`${TAG} patched instantiateStreaming (fallback)`);
   })();
 
-  // --------------- brotli decompress ---------------
-  const hasDS = typeof DecompressionStream === "function";
+  function progressBridge(user){
+    const s={unityMax:0, loader:0};
+    const emit=()=>{ try{ user?.(clamp01(Math.max(s.unityMax,s.loader))); }catch{} };
+    return {
+      unity(p){ s.unityMax=Math.max(s.unityMax,clamp01(p)); emit(); },
+      set(p){ s.loader=clamp01(p); emit(); },
+      bump(d){ s.loader=clamp01(s.loader+d); emit(); },
+      done(){ s.loader=1; s.unityMax=Math.max(s.unityMax,1); emit(); }
+    };
+  }
 
-  async function fetchDecompressBRToArrayBuffer(url, {
-    mime = "application/octet-stream",
-    noStore = false,
-    onProgress = () => {},
-    progressWeight = 1.0,   // share in [0..1] for this asset
-    boostAfter = 0.08,      // virtual tail for CPU decompression
-  } = {}) {
-    if (!hasDS) {
-      throw new Error(`${TAG} DecompressionStream('br') is not supported in this browser. Use the existing shim fallback or request a JS Brotli fallback build.`);
-    }
+  async function fetchDecompressBRToArrayBuffer(url,{mime,noStore,onProgress,progressWeight,boostAfter}){
+    const res = await fetch(url,{cache:noStore?"no-store":"default"});
+    if (!res.ok || !res.body) throw new Error(`${TAG} fetch failed ${res.status} for ${url}`);
 
-    const res = await fetch(url, {
-      cache: noStore ? "no-store" : "default",
-    });
-    if (!res.ok || !res.body) {
-      throw new Error(`${TAG} fetch failed ${res.status} for ${url}`);
-    }
-
-    const total = Number(res.headers.get("content-length")) || 0;
+    const total = Number(res.headers.get("content-length"))||0;
     let read = 0;
-
-    // Count compressed bytes to report smooth progress before/while decompressing
     const progressTap = new TransformStream({
-      transform(chunk, ctlr) {
-        read += chunk.byteLength || chunk.length || 0;
+      transform(chunk,ctlr){
+        read += chunk.byteLength||chunk.length||0;
         const downloadPart = (1 - boostAfter);
-        const p = total ? (read / total) * downloadPart : Math.min(downloadPart, (read / (1024 * 1024)) * 0.01);
-        onProgress(clamp01(p) * progressWeight);
+        const p = total ? (read/total)*downloadPart : Math.min(downloadPart,(read/(1024*1024))*0.01);
+        onProgress(Math.max(0,Math.min(1,p))*progressWeight);
         ctlr.enqueue(chunk);
       }
     });
 
     const ds = new DecompressionStream("br");
-    const decompressedStream = res.body
-      .pipeThrough(progressTap)
-      .pipeThrough(ds);
+    const decompressed = res.body.pipeThrough(progressTap).pipeThrough(ds);
+    const ab = await new Response(decompressed,{headers:{"Content-Type":mime}}).arrayBuffer();
 
-    // Collect decompressed into ArrayBuffer
-    const decompressedResp = new Response(decompressedStream, { headers: { "Content-Type": mime } });
-    const ab = await decompressedResp.arrayBuffer();
-
-    // Smooth tail to visualize CPU work
-    const steps = 6;
-    for (let i = 1; i <= steps; i++) {
-      await sleep(8);
-      const p = (1 - boostAfter) + boostAfter * (i / steps);
-      onProgress(clamp01(p) * progressWeight);
-    }
-
+    for(let i=1;i<=6;i++){ await sleep(8); const p=(1-boostAfter)+boostAfter*(i/6); onProgress(p*progressWeight); }
     return ab;
   }
 
-  function arrayBufferToBlobUrl(ab, mime) {
-    const b = new Blob([ab], { type: mime });
-    return URL.createObjectURL(b);
+  // -------- Fallback path (uses your 2loader.js end-to-end) ----------
+  async function runFallback2Loader(canvas, baseConfig, userOnProgress){
+    console.warn(`${TAG} DecompressionStream('br') is not available. Switching to fallbackLoaderUrl (2loader.js).`);
+    const { fallbackLoaderUrl } = baseConfig;
+    if (!fallbackLoaderUrl) throw new Error(`${TAG} Provide config.fallbackLoaderUrl pointing to your 2loader.js`);
+
+    // Load the proven 2loader.js (it will unpack .br itself)
+    await loadScript(fallbackLoaderUrl);
+
+    // From here we do the simplest path: call the normal inner loader entry if present,
+    // otherwise 2loader.js typically provides its own bootstrap that hooks createUnityInstance.
+    if (typeof window.createUnityInstance !== "function"){
+      throw new Error(`${TAG} 2loader.js did not expose createUnityInstance`);
+    }
+    return window.createUnityInstance(canvas, baseConfig, userOnProgress);
   }
 
-  // --------------- progress combiner ---------------
-  function makeProgressBridge(userOnProgress) {
-    const ui = { unityMax: 0, loader: 0 };
-    const notify = () => {
-      const p = Math.max(ui.unityMax, ui.loader);
-      try { userOnProgress?.(clamp01(p)); } catch {}
-    };
-    return {
-      unity(p) { ui.unityMax = Math.max(ui.unityMax, clamp01(p)); notify(); },
-      set(p)  { ui.loader = clamp01(p); notify(); },
-      bump(dp){ ui.loader = clamp01(ui.loader + dp); notify(); },
-      done()  { ui.loader = 1; ui.unityMax = Math.max(ui.unityMax, 1); notify(); },
-    };
-  }
-
-  // --------------- public API ----------------
-  async function startUnityBr(canvas, config, userOnProgress) {
+  // -------- Public API -------------------------------------------------
+  async function startUnityBr(canvas, config, userOnProgress){
     console.log(`${TAG} startUnityBr called`);
     if (!canvas) throw new Error(`${TAG} canvas is required`);
     if (!config) throw new Error(`${TAG} config is required`);
 
     const {
-      dataUrl,          // ".../ocs-gm.data.br"
-      codeUrl,          // ".../ocs-gm.wasm.br"
-      frameworkUrl,     // ".../ocs-gm.f.js"
-      innerLoaderUrl,   // ".../loader.js"
+      dataUrl, codeUrl, frameworkUrl,
+      innerLoaderUrl,               // your original loader.js
+      fallbackLoaderUrl             // <-- NEW: url to 2loader.js for environments w/o 'br'
     } = config;
 
-    if (!dataUrl || !codeUrl || !frameworkUrl || !innerLoaderUrl) {
-      throw new Error(`${TAG} config must include dataUrl, codeUrl, frameworkUrl, innerLoaderUrl`);
+    if (!dataUrl || !codeUrl || !frameworkUrl) {
+      throw new Error(`${TAG} config must include dataUrl, codeUrl, frameworkUrl`);
     }
 
-    const PB = makeProgressBridge(userOnProgress);
-    const W = { data: 0.42, wasm: 0.48, beforeRun: 0.10 }; // sum <= 1
+    // If no 'br' support → go straight to fallback (2loader.js)
+    if (!hasDS){
+      return runFallback2Loader(canvas, config, userOnProgress);
+    }
+
+    if (!innerLoaderUrl){
+      throw new Error(`${TAG} config.innerLoaderUrl is required (path to original loader.js)`);
+    }
+
+    const PB = progressBridge(userOnProgress);
+    const W = { data:0.42, wasm:0.48, beforeRun:0.10 };
 
     PB.set(0.02);
-
-    // 1) Inner loader (once)
-    await loadInnerLoaderOnce(innerLoaderUrl);
+    await (async()=>{ // load inner loader once
+      console.log(`${TAG} loading inner loader: ${innerLoaderUrl}`);
+      await loadInnerOnce(innerLoaderUrl);
+    })();
     PB.bump(0.02);
 
-    // 2) Parallel download + decompress
-    const dataPromise = fetchDecompressBRToArrayBuffer(dataUrl, {
-      mime: "application/octet-stream",
-      noStore: false, // allow HTTP cache for data
-      onProgress: (p) => PB.set(p), // occupies [0..W.data]
-      progressWeight: W.data,
-      boostAfter: 0.08,
+    // Parallel download + decompress
+    const dataP = fetchDecompressBRToArrayBuffer(dataUrl,{
+      mime:"application/octet-stream", noStore:false,
+      onProgress:(p)=>PB.set(p), progressWeight:W.data, boostAfter:0.08
+    });
+    const wasmP = fetchDecompressBRToArrayBuffer(codeUrl,{
+      mime:"application/wasm", noStore:true,
+      onProgress:(p)=>PB.set(W.data+p), progressWeight:W.wasm, boostAfter:0.10
     });
 
-    const wasmPromise = fetchDecompressBRToArrayBuffer(codeUrl, {
-      mime: "application/wasm",
-      noStore: true, // strict fresh for wasm
-      onProgress: (p) => PB.set(W.data + p), // occupies [W.data..W.data+W.wasm]
-      progressWeight: W.wasm,
-      boostAfter: 0.10,
-    });
+    const [dataAB, wasmAB] = await Promise.all([dataP, wasmP]);
+    const dataBlob = URL.createObjectURL(new Blob([dataAB],{type:"application/octet-stream"}));
+    const wasmBlob = URL.createObjectURL(new Blob([wasmAB],{type:"application/wasm"}));
 
-    const [dataAB, wasmAB] = await Promise.all([dataPromise, wasmPromise]);
-
-    // 3) Blob URLs (already decompressed)
-    const dataBlobUrl = arrayBufferToBlobUrl(dataAB, "application/octet-stream");
-    const wasmBlobUrl = arrayBufferToBlobUrl(wasmAB, "application/wasm");
-
-    // 4) Patch config for inner loader
-    const patchedConfig = {
-      ...config,
-      dataUrl: dataBlobUrl,
-      codeUrl: wasmBlobUrl,
-      // frameworkUrl stays as is (normal js)
-    };
-
-    // 5) Bridge Unity progress
-    const unityOnProgress = (p) => PB.unity(p);
+    const patched = { ...config, dataUrl:dataBlob, codeUrl:wasmBlob };
+    const unityOnProgress = (p)=>PB.unity(p);
 
     PB.set(W.data + W.wasm + 0.02);
-
-    // 6) Call inner loader
-    console.log(`${TAG} calling createUnityInstance`);
-    const instance = await window.createUnityInstance(canvas, patchedConfig, unityOnProgress)
-      .catch(err => {
-        console.error(`${TAG} createUnityInstance error`, err);
-        throw err;
-      });
+    const inst = await window.createUnityInstance(canvas, patched, unityOnProgress)
+      .catch(e=>{ console.error(`${TAG} createUnityInstance error`, e); throw e; });
 
     PB.set(W.data + W.wasm + W.beforeRun);
     PB.done();
 
-    // 7) Cleanup
-    addEventListener("pagehide", () => {
-      try { URL.revokeObjectURL(dataBlobUrl); } catch {}
-      try { URL.revokeObjectURL(wasmBlobUrl); } catch {}
-    }, { once: true });
-
+    addEventListener("pagehide", ()=>{ try{URL.revokeObjectURL(dataBlob);}catch{} try{URL.revokeObjectURL(wasmBlob);}catch{} }, {once:true});
     console.log(`${TAG} Unity instance ready`);
-    return instance;
+    return inst;
   }
 
-  // export
   window.startUnityBr = startUnityBr;
   console.log(`${TAG} exported startUnityBr (typeof: ${typeof window.startUnityBr})`);
 })();
