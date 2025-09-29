@@ -43,9 +43,13 @@
           }).catch(function(e){ controller.error(e); });
         }
       });
-      return streamToU8(body, function(d){ loaded+=d; if(onProgress && total) onProgress(loaded,total); })
-        .then(function(u8){ if(onProgress && !total) onProgress(loaded,loaded); return {u8:u8,res:res}; });
-    });
+return streamToU8(body, function(d){
+  loaded+=d;
+  if(onProgress) onProgress(loaded,total);          // ← вызываем всегда
+}).then(function(u8){
+  if(onProgress) onProgress(loaded, total||loaded); // ← финальный тик
+  return {u8:u8,res:res};
+});
   }
 
 function chainProgress(preCap, outer){
@@ -116,6 +120,26 @@ function chainProgress(preCap, outer){
   };
 }
 
+function makeDownloaderProgress(start, span, storageKey, prog){
+  var virtTotal = 0;
+  try {
+    var v = Number(localStorage.getItem(storageKey)||'0');
+    if (v>0) virtTotal = v; // берём размер из прошлого раза
+  } catch(e){}
+  return function(loaded, total){
+    if (total>0){
+      virtTotal = total;
+      try{ localStorage.setItem(storageKey, String(total)); }catch(e){}
+    } else {
+      if (virtTotal===0) virtTotal = loaded + 524288;             // сид 512КБ
+      else if (loaded > virtTotal*0.98) virtTotal = loaded/0.98;   // расширяем «потолок» под конец
+    }
+    var f = loaded / virtTotal; if (f<0) f=0; if (f>1) f=1;
+    // линейно раскрашиваем участок шкалы [start..start+span]
+    prog.pre(start + span * f);
+  };
+}
+
   function loadScriptOnce(src){
     return new Promise(function(resolve,reject){
       if (document.querySelector('script[data-br-inner="'+src+'"]')) return resolve();
@@ -153,8 +177,8 @@ var prog = chainProgress(preCap, function(p){
 });
 if (onProgress) onProgress(0.06);
 
-      var wasmFetch = fetchWithProgress(codeUrl, {cache:'default'}, function(l,t){ var part=0.5*(t?l/t:1); prog.pre(0.30*part); });
-      var dataFetch = fetchWithProgress(dataUrl, {cache:'default'}, function(l,t){ var part=0.5*(t?l/t:1); prog.pre(0.30+0.40*part); });
+var wasmFetch = fetchWithProgress(codeUrl, {cache:'default'}, onWasmDL);
+var dataFetch = fetchWithProgress(dataUrl,  {cache:'default'},     onDataDL);
 
       return Promise.all([wasmFetch, dataFetch]).then(function(arr){
         var wasmBr = arr[0].u8, dataBr = arr[1].u8;
