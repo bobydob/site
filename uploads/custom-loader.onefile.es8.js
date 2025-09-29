@@ -147,10 +147,11 @@ function chainProgress(preCap, outer){
       assert(dataUrl && codeUrl && frameworkUrl, 'config.{dataUrl,codeUrl,frameworkUrl} are required');
 
       log(TAG,'start → downloading & inflating .br assets');
-      var preCap = 0.85;
+var preCap = 0.85;
 var prog = chainProgress(preCap, function(p){
-  if (onProgress) onProgress(p < 0.05 ? 0.05 : p);
+  if (onProgress) onProgress(p);
 });
+if (onProgress) onProgress(0.06);
 
       var wasmFetch = fetchWithProgress(codeUrl, {cache:'default'}, function(l,t){ var part=0.5*(t?l/t:1); prog.pre(0.30*part); });
       var dataFetch = fetchWithProgress(dataUrl, {cache:'default'}, function(l,t){ var part=0.5*(t?l/t:1); prog.pre(0.30+0.40*part); });
